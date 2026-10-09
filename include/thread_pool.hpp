@@ -103,7 +103,6 @@ private:
 
     TaskQueue queue_;
     std::vector<std::thread> workers_;
-    std::vector<std::thread::id> worker_ids_;  // immutable after construction
     std::size_t thread_count_;
     std::once_flag shutdown_flag_;
     StatsRecorder stats_;
