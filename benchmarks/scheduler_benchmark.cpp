@@ -16,6 +16,9 @@ using namespace pce;
 struct BenchmarkResult {
     std::string policy_name;
     std::size_t workers;
+    std::size_t tasks_submitted;
+    std::size_t tasks_completed;
+    std::size_t tasks_verified;
     double execution_time_ms;
     double average_wait_time_ms;
     double total_overhead_ms;
@@ -63,9 +66,27 @@ void run_matrix_benchmark(std::size_t num_tasks, std::size_t workers, Scheduling
         }));
     }
 
-    // Wait for all
+    std::size_t completed = 0;
+    std::size_t verified = 0;
+
+    // Wait for all and verify
     for (auto& f : futures) {
-        f.get();
+        auto C = f.get();
+        completed++;
+        bool ok = true;
+        for (std::size_t r = 0; r < 64; ++r) {
+            for (std::size_t c = 0; c < 64; ++c) {
+                if (C[r][c] != 128.0) {
+                    ok = false;
+                }
+            }
+        }
+        if (ok) verified++;
+    }
+    
+    if (verified != num_tasks) {
+        std::cerr << "Validation failed! Verified: " << verified << " / " << num_tasks << "\n";
+        std::exit(1);
     }
 
     auto end_time = std::chrono::steady_clock::now();
@@ -77,6 +98,9 @@ void run_matrix_benchmark(std::size_t num_tasks, std::size_t workers, Scheduling
     results.push_back({
         policy_name,
         workers,
+        num_tasks,
+        completed,
+        verified,
         total_ms,
         stats.average_queue_wait_time_ms,
         stats.total_scheduler_overhead_ms,
@@ -106,10 +130,13 @@ int main() {
 
     // Save to CSV
     std::ofstream csv("scheduler_benchmark.csv");
-    csv << "Policy,Workers,TotalTimeMs,AvgWaitMs,OverheadMs,StealAttempts,SuccessfulSteals\n";
+    csv << "Policy,Workers,TasksSubmitted,TasksCompleted,TasksVerified,TotalTimeMs,AvgWaitMs,OverheadMs,StealAttempts,SuccessfulSteals\n";
     for (const auto& r : results) {
         csv << r.policy_name << ","
             << r.workers << ","
+            << r.tasks_submitted << ","
+            << r.tasks_completed << ","
+            << r.tasks_verified << ","
             << r.execution_time_ms << ","
             << r.average_wait_time_ms << ","
             << r.total_overhead_ms << ","

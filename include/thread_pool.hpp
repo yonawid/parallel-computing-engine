@@ -127,14 +127,14 @@ public:
         };
 
         if (policy_ == SchedulingPolicy::WorkStealing) {
-            std::lock_guard<std::mutex> lock(ws_mutex_);
-            if (ws_closed_) {
+            if (ws_closed_.load(std::memory_order_acquire)) {
                 throw std::runtime_error("ThreadPool::submit: pool has been shut down");
             }
-            std::size_t index = ws_rr_counter_++ % thread_count_;
+            std::size_t index = ws_rr_counter_.fetch_add(1, std::memory_order_relaxed) % thread_count_;
             worker_deques_[index]->push_bottom(std::move(wrapped_task));
             stats_.on_submitted(priority);
-            ws_cv_.notify_one();
+            ws_event_counter_.fetch_add(1, std::memory_order_release);
+            ws_event_counter_.notify_one();
         } else {
             if (!queue_.push(priority, std::move(wrapped_task),
                              [recorder_ptr = &stats_, priority]() noexcept {
@@ -168,9 +168,8 @@ private:
     // Work-stealing state
     std::vector<std::unique_ptr<WorkerDeque>> worker_deques_;
     std::atomic<std::size_t> ws_rr_counter_{0};
-    std::mutex ws_mutex_;
-    std::condition_variable ws_cv_;
-    bool ws_closed_ = false;
+    std::atomic<uint64_t> ws_event_counter_{0};
+    std::atomic<bool> ws_closed_{false};
 
 };
 

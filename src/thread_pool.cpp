@@ -53,11 +53,9 @@ void ThreadPool::shutdown() {
     // call_once makes concurrent callers wait until the first one has joined.
     std::call_once(shutdown_flag_, [this] {
         if (policy_ == SchedulingPolicy::WorkStealing) {
-            {
-                std::lock_guard<std::mutex> lock(ws_mutex_);
-                ws_closed_ = true;
-            }
-            ws_cv_.notify_all();
+            ws_closed_.store(true, std::memory_order_release);
+            ws_event_counter_.fetch_add(1, std::memory_order_release);
+            ws_event_counter_.notify_all();
         } else {
             queue_.close();
         }
@@ -111,23 +109,20 @@ void ThreadPool::worker_loop(std::size_t worker_index) {
                     auto overhead_end = std::chrono::steady_clock::now();
                     stats_.record_overhead(overhead_end - overhead_start);
                     
-                    // 3. Sleep on global CV
-                    std::unique_lock<std::mutex> lock(ws_mutex_);
-                    ws_cv_.wait(lock, [this]() {
-                        if (ws_closed_) return true;
-                        for (auto& d : worker_deques_) {
-                            if (!d->empty()) return true;
-                        }
-                        return false;
-                    });
+                    // 3. Sleep on global CV using lock-free event counter
+                    uint64_t cmp = ws_event_counter_.load(std::memory_order_acquire);
                     
-                    if (ws_closed_) {
-                        bool has_work = false;
-                        for (auto& d : worker_deques_) {
-                            if (!d->empty()) { has_work = true; break; }
-                        }
-                        if (!has_work) break; // Shutdown and empty
+                    bool has_work = false;
+                    for (auto& d : worker_deques_) {
+                        if (!d->empty()) { has_work = true; break; }
                     }
+                    if (has_work) continue;
+                    
+                    if (ws_closed_.load(std::memory_order_acquire)) {
+                        break; // Shutdown and empty
+                    }
+
+                    ws_event_counter_.wait(cmp, std::memory_order_acquire);
                     
                     // Start next iteration (we woke up, maybe work is available now)
                     continue; 
@@ -141,13 +136,14 @@ void ThreadPool::worker_loop(std::size_t worker_index) {
 
         } else {
             // Priority or FIFO
-            if (!queue_.wait_and_pop(task)) {
+            std::chrono::steady_clock::duration idle_duration(0);
+            if (!queue_.wait_and_pop(task, &idle_duration)) {
                 auto overhead_end = std::chrono::steady_clock::now();
-                stats_.record_overhead(overhead_end - overhead_start);
+                stats_.record_overhead((overhead_end - overhead_start) - idle_duration);
                 break;
             }
             auto overhead_end = std::chrono::steady_clock::now();
-            stats_.record_overhead(overhead_end - overhead_start);
+            stats_.record_overhead((overhead_end - overhead_start) - idle_duration);
         }
 
         if (task) {

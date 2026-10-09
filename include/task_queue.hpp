@@ -75,9 +75,13 @@ public:
 
     // Blocks until a task is available or the queue is closed and empty.
     // Returns false only when closed and fully drained (all priorities).
-    bool wait_and_pop(std::function<void()>& task) {
+    bool wait_and_pop(std::function<void()>& task, std::chrono::steady_clock::duration* idle_time = nullptr) {
         std::unique_lock<std::mutex> lock(mutex_);
+        auto start = std::chrono::steady_clock::now();
         cv_.wait(lock, [this] { return closed_ || total_ != 0; });
+        if (idle_time) {
+            *idle_time = std::chrono::steady_clock::now() - start;
+        }
         if (total_ == 0) {
             return false;  // closed_ must be true here
         }
