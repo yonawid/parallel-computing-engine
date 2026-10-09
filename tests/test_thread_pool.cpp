@@ -12,6 +12,7 @@
 #include <thread>
 #include <vector>
 
+#include "task_priority.hpp"
 #include "task_queue.hpp"
 #include "thread_pool.hpp"
 
@@ -331,13 +332,13 @@ void test_destructor_drains_tasks() {
 void test_queue_fifo_and_drain() {
     pce::TaskQueue q;
     std::vector<int> order;
-    for (int i = 0; i < 5; ++i) CHECK(q.push([&order, i] { order.push_back(i); }));
+    for (int i = 0; i < 5; ++i) CHECK(q.push(pce::TaskPriority::Normal, [&order, i] { order.push_back(i); }, []() noexcept {}));
     CHECK(!q.is_closed());
-    CHECK(!q.push(nullptr));
+    CHECK(!q.push(pce::TaskPriority::Normal, nullptr, []() noexcept {}));
     q.close();
     q.close();  // idempotent
     CHECK(q.is_closed());
-    CHECK(!q.push([] {}));  // rejected once closed
+    CHECK(!q.push(pce::TaskPriority::Normal, [] {}, []() noexcept {}));  // rejected once closed
     CHECK_EQ(q.size(), std::size_t{5});
 
     std::function<void()> task;
@@ -349,6 +350,45 @@ void test_queue_fifo_and_drain() {
     CHECK_EQ(popped, 5);
     CHECK(order == (std::vector<int>{0, 1, 2, 3, 4}));
     CHECK(!q.wait_and_pop(task));  // closed and empty stays false
+}
+
+void test_priority_ordering() {
+    pce::ThreadPool pool(1);
+    // Block the worker so tasks queue up
+    std::promise<void> start;
+    pool.submit([&start] { start.get_future().wait(); });
+
+    std::vector<int> order;
+    std::mutex m;
+    auto push_order = [&](int val) {
+        std::lock_guard<std::mutex> l(m);
+        order.push_back(val);
+    };
+
+    pool.submit_with_priority(pce::TaskPriority::Low, [&] { push_order(1); });
+    pool.submit_with_priority(pce::TaskPriority::Normal, [&] { push_order(2); });
+    pool.submit_with_priority(pce::TaskPriority::High, [&] { push_order(3); });
+    pool.submit_with_priority(pce::TaskPriority::Low, [&] { push_order(4); });
+    pool.submit_with_priority(pce::TaskPriority::Normal, [&] { push_order(5); });
+    pool.submit_with_priority(pce::TaskPriority::High, [&] { push_order(6); });
+
+    start.set_value();
+    pool.shutdown();
+
+    std::vector<int> expected = {3, 6, 2, 5, 1, 4};
+    CHECK(order == expected);
+}
+
+void test_execution_stats() {
+    pce::ThreadPool pool(2);
+    pool.submit([] { return 1; }).wait();
+    auto f = pool.submit([] { throw std::runtime_error("err"); });
+    try { f.get(); } catch (...) {}
+    pool.shutdown();
+    auto stats = pool.get_stats();
+    CHECK_EQ(stats.tasks_submitted, 2ULL);
+    CHECK_EQ(stats.tasks_completed, 2ULL);
+    CHECK_EQ(stats.tasks_failed, 1ULL);
 }
 
 }  // namespace
@@ -375,6 +415,8 @@ int main() {
         {"repeated_construct_destroy", test_repeated_construct_destroy},
         {"destructor_drains_tasks", test_destructor_drains_tasks},
         {"queue_fifo_and_drain", test_queue_fifo_and_drain},
+        {"priority_ordering", test_priority_ordering},
+        {"execution_stats", test_execution_stats},
     };
 
     int passed = 0;

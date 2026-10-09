@@ -1,8 +1,39 @@
-# parallel-computing-engine
+# C++20 Parallel Computing Engine
 
-A from-scratch C++20 parallel computing engine built with the standard library only (no Boost, OpenMP, TBB). This repository currently contains **Phase 1**: a reusable thread pool and a thread-safe task queue with deterministic correctness tests. CPU only.
+A from-scratch C++20 parallel computing engine built with the standard library only (no Boost, OpenMP, TBB). This repository implements a fully featured engine, spanning from low-level thread pool execution to higher-level parallel algorithms and benchmarks. CPU only.
 
-## Phase 1 architecture
+## Features Completed
+- **Phase 1: Thread Pool & Safe Queue**
+  - Configurable fixed-size worker pool, worker reuse.
+  - `submit()` for lambdas, functions, functors; void and non-void results.
+  - Exception propagation, move-only callables/arguments support.
+  - Graceful, idempotent, thread-safe shutdown; destructor drains accepted tasks.
+  - Concurrent producers using a blocking, closable FIFO queue.
+- **Phase 2: Priority & Statistics**
+  - Priority-aware task scheduling (`TaskPriority::High`, `Normal`, `Low`).
+  - Execution statistics (`tasks_submitted`, `tasks_completed`, `tasks_failed`).
+  - Active worker tracking (`current_active_workers`, `peak_active_workers`).
+- **Phase 3: Parallel Algorithms**
+  - `pce::parallel_reduce` for concurrent reduction operations on iterators.
+  - `pce::parallel_matrix_multiply` for tiled and parallel dense matrix multiplication.
+- **Phase 4: Benchmarking**
+  - Custom benchmarking suite to evaluate sequential vs parallel speedups.
+  - CSV and JSON output format generation for analysis.
+  - Actual measured performance on an MSVC 2026 test system:
+
+| Operation | Size | Workers | Seq Time(ms) | Par Time(ms) | Speedup | Efficiency |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Reduction | 1,000,000 | 2 | 0.43 | 0.33 | 1.31 | 0.66 |
+| Reduction | 10,000,000 | 4 | 6.23 | 3.15 | 1.98 | 0.49 |
+| Reduction | 50,000,000 | 6 | 29.29 | 15.35 | 1.91 | 0.32 |
+| MatMul | 200 | 2 | 5.78 | 12.01 | 0.48 | 0.24 |
+| MatMul | 500 | 4 | 99.45 | 109.90 | 0.90 | 0.23 |
+| MatMul | 800 | 6 | 437.73 | 238.66 | 1.83 | 0.31 |
+- **Phase 5: Release & CI**
+  - Automated CI validation with GitHub Actions across Ubuntu, Windows, and macOS.
+  - Stress testing capabilities with comprehensive unit tests for thread pool and algorithms.
+
+## Architecture
 
 ```
  producers ──submit()──► ThreadPool ──push()──► TaskQueue ◄──wait_and_pop()── workers (std::thread × N)
@@ -12,27 +43,16 @@ A from-scratch C++20 parallel computing engine built with the standard library o
 
 | File | Role |
 |------|------|
-| `include/task_queue.hpp` | `pce::TaskQueue`: blocking, closable FIFO of `std::function<void()>` |
-| `include/thread_pool.hpp` | `pce::ThreadPool`: templated `submit()`, lifecycle docs |
+| `include/task_queue.hpp` | `pce::TaskQueue`: blocking, closable priority queue of `std::function<void()>` |
+| `include/thread_pool.hpp` | `pce::ThreadPool`: templated `submit()`, lifecycle management |
+| `include/execution_stats.hpp` | Thread-safe recorder and struct for statistics |
+| `include/task_priority.hpp` | Definition of execution priorities |
+| `include/parallel_algorithms.hpp`| `parallel_reduce` and `parallel_matrix_multiply` |
 | `src/thread_pool.cpp` | construction, worker loop, shutdown |
-| `examples/main.cpp` | demo: 10 compute tasks, a void task, a throwing task |
-| `tests/test_thread_pool.cpp` | custom test harness, 20 test cases |
-
-### Task queue
-- `push()` appends under a mutex and notifies one waiter; returns `false` once closed.
-- `wait_and_pop()` blocks on a condition variable with a predicate (spurious-wakeup safe, no busy waiting). It returns `false` only when the queue is closed **and** empty, so queued work is drained after `close()`.
-- `close()` is idempotent and wakes all waiters. Tasks are never executed under the queue mutex. Internal state is not exposed.
-
-### Thread pool
-- Workers loop on `wait_and_pop()` and run each task with no lock held.
-- `submit()` decay-copies/moves the callable and arguments into a `std::packaged_task` (held by `shared_ptr` because `std::function` requires copyable targets), so move-only callables/arguments work and no references dangle. Exceptions surface through the future.
-- Shutdown = close the queue, workers drain it, join. It is guarded by `std::call_once`, so it is idempotent and concurrent callers all return only after the join completes. The queue's closed flag is the single source of truth for rejecting submissions (throws `std::runtime_error`).
-- If spawning a worker throws, already-started workers are closed and joined before rethrowing, so no joinable thread is destroyed.
-- Calling `shutdown()` from a task running on the same pool throws `std::logic_error` (a worker cannot join itself).
-- `ThreadPool(0)` throws `std::invalid_argument`.
-
-### Concurrency primitives
-`std::thread`, `std::mutex`, `std::condition_variable`, `std::once_flag`, `std::packaged_task`/`std::future`, `std::atomic` (tests only).
+| `examples/main.cpp` | Demo of thread pool and exception handling |
+| `tests/test_thread_pool.cpp` | Custom test harness for threading edge cases |
+| `tests/test_algorithms.cpp` | Validation of parallel algorithms correctness |
+| `benchmarks/benchmark.cpp` | Evaluation framework generating speedup metrics |
 
 ## Build
 
@@ -44,34 +64,22 @@ cmake -S . -B build
 cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 .\build\Release\pce_example.exe
+.\build\Release\pce_benchmark.exe
 ```
 Use `--config Debug` for Debug builds. Run from a "Developer PowerShell for VS" or let CMake locate Visual Studio.
 
-### Linux
+### Linux & macOS
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 ./build/pce_example
+./build/pce_benchmark
 ```
 ThreadSanitizer (GCC/Clang): `cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=RelWithDebInfo -DPCE_ENABLE_TSAN=ON`.
 
-## Supported features
-- Configurable fixed-size worker pool, worker reuse
-- `submit()` for lambdas, functions, functors; void and non-void results
-- Exception propagation, move-only callables/arguments
-- Graceful, idempotent, thread-safe shutdown; destructor drains accepted tasks
-- Concurrent producers
-
-## Current limitations
-- Single shared FIFO queue (one mutex; no work stealing, priorities, or cancellation)
-- Unbounded queue (no back-pressure)
-- Fixed thread count; no statistics
-- A task that blocks on the result of another task queued on the same pool can deadlock when workers are exhausted
-- Tests passing does not prove absence of races; run under ThreadSanitizer on Linux/Clang/GCC where available
-
-## Roadmap (not yet implemented)
-- **Phase 2:** Advanced task scheduling and execution statistics
-- **Phase 3:** Parallel algorithms and matrix multiplication
-- **Phase 4:** Performance benchmarking and scalability analysis
-- **Phase 5:** Stress testing, documentation, and GitHub release
+## Limitations
+- Unbounded queue (no back-pressure).
+- Strict priority scheduling can starve low-priority tasks under continuous high-priority load.
+- A task that blocks on the result of another task queued on the same pool can deadlock when workers are exhausted (such as running `parallel_matrix_multiply` recursively inside a thread pool thread).
+- Tests passing does not prove absence of races; run under ThreadSanitizer on Linux/Clang/GCC where available.

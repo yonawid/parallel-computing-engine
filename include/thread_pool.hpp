@@ -11,6 +11,8 @@
 #include <utility>
 #include <vector>
 
+#include "execution_stats.hpp"
+#include "task_priority.hpp"
 #include "task_queue.hpp"
 
 namespace pce {
@@ -43,23 +45,46 @@ public:
     ThreadPool(ThreadPool&&) = delete;
     ThreadPool& operator=(ThreadPool&&) = delete;
 
-    // Schedules function(args...) and returns a future for its result.
+    // Schedules function(args...) at Normal priority and returns a future for its result.
+    template <typename F, typename... Args>
+    auto submit(F&& function, Args&&... args)
+        -> std::future<std::invoke_result_t<std::decay_t<F>, std::decay_t<Args>...>> {
+        return submit_with_priority(TaskPriority::Normal, std::forward<F>(function),
+                                    std::forward<Args>(args)...);
+    }
+
+    // Schedules function(args...) with the given priority and returns a future for its result.
     // The callable and arguments are decay-copied (or moved) into the task, so
     // no references to caller state are retained; use std::ref explicitly to
     // share. Exceptions thrown by the task are delivered through the future.
     // Throws std::runtime_error if the pool is shutting down or shut down.
     template <typename F, typename... Args>
-    auto submit(F&& function, Args&&... args)
+    auto submit_with_priority(TaskPriority priority, F&& function, Args&&... args)
         -> std::future<std::invoke_result_t<std::decay_t<F>, std::decay_t<Args>...>> {
         using Result = std::invoke_result_t<std::decay_t<F>, std::decay_t<Args>...>;
 
         auto task = std::make_shared<std::packaged_task<Result()>>(
             [fn = std::decay_t<F>(std::forward<F>(function)),
-             tup = std::tuple<std::decay_t<Args>...>(std::forward<Args>(args)...)]() mutable
-            -> Result { return std::apply(std::move(fn), std::move(tup)); });
+             tup = std::tuple<std::decay_t<Args>...>(std::forward<Args>(args)...),
+             recorder_ptr = &stats_]() mutable -> Result {
+                ExecutionScope scope(*recorder_ptr);
+                try {
+                    if constexpr (std::is_void_v<Result>) {
+                        std::apply(std::move(fn), std::move(tup));
+                    } else {
+                        return std::apply(std::move(fn), std::move(tup));
+                    }
+                } catch (...) {
+                    scope.mark_failed();
+                    throw;
+                }
+            });
 
         std::future<Result> future = task->get_future();
-        if (!queue_.push([task = std::move(task)] { (*task)(); })) {
+        if (!queue_.push(priority, [task = std::move(task)] { (*task)(); },
+                         [recorder_ptr = &stats_, priority]() noexcept {
+                             recorder_ptr->on_submitted(priority);
+                         })) {
             throw std::runtime_error("ThreadPool::submit: pool has been shut down");
         }
         return future;
@@ -70,6 +95,9 @@ public:
 
     std::size_t size() const noexcept { return thread_count_; }
 
+    ExecutionStats get_stats() const { return stats_.snapshot(); }
+    std::size_t active_worker_count() const { return stats_.active_workers(); }
+
 private:
     void worker_loop();
 
@@ -78,6 +106,7 @@ private:
     std::vector<std::thread::id> worker_ids_;  // immutable after construction
     std::size_t thread_count_;
     std::once_flag shutdown_flag_;
+    StatsRecorder stats_;
 };
 
 }  // namespace pce

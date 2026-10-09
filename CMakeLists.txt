@@ -13,7 +13,7 @@ option(PCE_ENABLE_TSAN "Build with ThreadSanitizer (GCC/Clang only)" OFF)
 
 find_package(Threads REQUIRED)
 
-add_library(pce_thread_pool STATIC src/thread_pool.cpp)
+add_library(pce_thread_pool STATIC src/thread_pool.cpp src/execution_stats.cpp)
 target_include_directories(pce_thread_pool PUBLIC include)
 target_compile_features(pce_thread_pool PUBLIC cxx_std_20)
 target_link_libraries(pce_thread_pool PUBLIC Threads::Threads)
@@ -42,3 +42,13 @@ target_link_libraries(pce_tests PRIVATE pce_thread_pool)
 pce_set_warnings(pce_tests)
 add_test(NAME thread_pool_tests COMMAND pce_tests)
 set_tests_properties(thread_pool_tests PROPERTIES TIMEOUT 120)
+
+add_executable(pce_tests_algorithms tests/test_algorithms.cpp)
+target_link_libraries(pce_tests_algorithms PRIVATE pce_thread_pool)
+pce_set_warnings(pce_tests_algorithms)
+add_test(NAME algorithm_tests COMMAND pce_tests_algorithms)
+set_tests_properties(algorithm_tests PROPERTIES TIMEOUT 120)
+
+add_executable(pce_benchmark benchmarks/benchmark.cpp)
+target_link_libraries(pce_benchmark PRIVATE pce_thread_pool)
+pce_set_warnings(pce_benchmark)
