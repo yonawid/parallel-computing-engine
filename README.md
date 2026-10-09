@@ -32,13 +32,37 @@ A from-scratch C++20 parallel computing engine built with the standard library o
 - **Phase 5: Release & CI**
   - Automated CI validation with GitHub Actions across Ubuntu, Windows, and macOS.
   - Stress testing capabilities with comprehensive unit tests for thread pool and algorithms.
+- **Phase 6: Advanced Schedulers & Performance Benchmarks**
+  - Selectable scheduling modes: `FIFO`, `Priority`, and `WorkStealing`.
+  - True lock-free work-stealing implementation utilizing randomized victim selection, wait-free local queues, and a strictly synchronized condition-variable wakeup protocol to prevent lost wakeups and thread spinning.
+  - Fine-grained performance metrics isolating queue wait time from actual scheduler selection and locking overhead.
+  - Benchmarked scheduler performance across 12,000 matrix-processing tasks, measuring execution time and overhead on 1 to 6 concurrent threads.
+
+### Scheduler Benchmark Results (12,000 Tasks)
+
+| Policy | Workers | Total Time(ms) | Avg Wait(ms) | Overhead(ms) | Steal Attempts | Successful Steals |
+|--------|---------|----------------|--------------|--------------|----------------|-------------------|
+| FIFO | 1 | 3516.06 | 895.61 | 5.94 | 0 | 0 |
+| Priority | 1 | 3600.95 | 905.86 | 6.69 | 0 | 0 |
+| WorkStealing | 1 | 4263.73 | 978.69 | 8.95 | 0 | 0 |
+| FIFO | 2 | 2266.13 | 582.07 | 7.73 | 0 | 0 |
+| Priority | 2 | 2225.88 | 552.06 | 10.99 | 0 | 0 |
+| WorkStealing | 2 | 2580.72 | 575.57 | 9.09 | 12 | 10 |
+| FIFO | 4 | 1166.17 | 287.02 | 8.97 | 0 | 0 |
+| Priority | 4 | 1286.66 | 299.90 | 324.99 | 0 | 0 |
+| WorkStealing | 4 | 1443.45 | 301.64 | 8.70 | 124 | 68 |
+| FIFO | 6 | 819.34 | 201.88 | 14.71 | 0 | 0 |
+| Priority | 6 | 969.20 | 207.77 | 723.97 | 0 | 0 |
+| WorkStealing | 6 | 1063.38 | 204.69 | 9.15 | 250 | 102 |
 
 ## Architecture
 
 ```
- producers ──submit()──► ThreadPool ──push()──► TaskQueue ◄──wait_and_pop()── workers (std::thread × N)
-                │                                (mutex + condvar)
-                └──► std::future<T> ◄── std::packaged_task<T()> (runs on a worker)
+                     ┌── FIFO/Priority: push() ──► TaskQueue ◄──wait_and_pop()──┐
+ producers ──submit()┤                                                          ├─ workers (std::thread × N)
+                     └── WorkStealing: push_bottom() ──► WorkerDeque ◄──steal()─┘
+                                     │
+                                     └──► std::future<T> ◄── std::packaged_task<T()> (runs on a worker)
 ```
 
 | File | Role |

@@ -40,6 +40,11 @@ public:
         return true;
     }
 
+    bool empty() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return deque_.empty();
+    }
+
 private:
     std::mutex mutex_;
     std::deque<std::function<void()>> deque_;
@@ -128,7 +133,6 @@ public:
             }
             std::size_t index = ws_rr_counter_++ % thread_count_;
             worker_deques_[index]->push_bottom(std::move(wrapped_task));
-            ws_total_tasks_++;
             stats_.on_submitted(priority);
             ws_cv_.notify_one();
         } else {
@@ -166,7 +170,6 @@ private:
     std::atomic<std::size_t> ws_rr_counter_{0};
     std::mutex ws_mutex_;
     std::condition_variable ws_cv_;
-    std::size_t ws_total_tasks_ = 0;
     bool ws_closed_ = false;
 
 };

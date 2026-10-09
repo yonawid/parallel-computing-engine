@@ -114,11 +114,19 @@ void ThreadPool::worker_loop(std::size_t worker_index) {
                     // 3. Sleep on global CV
                     std::unique_lock<std::mutex> lock(ws_mutex_);
                     ws_cv_.wait(lock, [this]() {
-                        return ws_total_tasks_ > 0 || ws_closed_;
+                        if (ws_closed_) return true;
+                        for (auto& d : worker_deques_) {
+                            if (!d->empty()) return true;
+                        }
+                        return false;
                     });
                     
-                    if (ws_closed_ && ws_total_tasks_ == 0) {
-                        break; // Shutdown and empty
+                    if (ws_closed_) {
+                        bool has_work = false;
+                        for (auto& d : worker_deques_) {
+                            if (!d->empty()) { has_work = true; break; }
+                        }
+                        if (!has_work) break; // Shutdown and empty
                     }
                     
                     // Start next iteration (we woke up, maybe work is available now)
@@ -127,11 +135,6 @@ void ThreadPool::worker_loop(std::size_t worker_index) {
             }
             
             if (task) {
-                // We got a task (local or stolen). Decrement global task count.
-                {
-                    std::lock_guard<std::mutex> lock(ws_mutex_);
-                    ws_total_tasks_--;
-                }
                 auto overhead_end = std::chrono::steady_clock::now();
                 stats_.record_overhead(overhead_end - overhead_start);
             }
