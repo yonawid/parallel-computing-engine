@@ -31,6 +31,24 @@ void StatsRecorder::on_finished(std::chrono::nanoseconds duration, bool failed) 
     total_execution_ += duration;
 }
 
+void StatsRecorder::record_wait_time(std::chrono::nanoseconds wait_time) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    total_wait_ += wait_time;
+}
+
+void StatsRecorder::record_overhead(std::chrono::nanoseconds overhead) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    total_overhead_ += overhead;
+}
+
+void StatsRecorder::record_steal_attempt(bool success) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++steal_attempts_;
+    if (success) {
+        ++successful_steals_;
+    }
+}
+
 ExecutionStats StatsRecorder::snapshot() const {
     std::lock_guard<std::mutex> lock(mutex_);
     ExecutionStats s;
@@ -43,10 +61,22 @@ ExecutionStats StatsRecorder::snapshot() const {
     s.low_priority_submitted = low_;
     s.active_workers = active_;
     s.peak_active_workers = peak_;
-    s.total_execution_ms =
+    s.tasks_stolen = successful_steals_;
+    s.steal_attempts = steal_attempts_;
+    s.successful_steals = successful_steals_;
+    
+    s.total_execution_time_ms =
         std::chrono::duration<double, std::milli>(total_execution_).count();
-    s.average_execution_ms =
-        completed_ == 0 ? 0.0 : s.total_execution_ms / static_cast<double>(completed_);
+    s.average_execution_time_ms =
+        completed_ == 0 ? 0.0 : s.total_execution_time_ms / static_cast<double>(completed_);
+
+    s.total_queue_wait_time_ms =
+        std::chrono::duration<double, std::milli>(total_wait_).count();
+    s.average_queue_wait_time_ms =
+        started_ == 0 ? 0.0 : s.total_queue_wait_time_ms / static_cast<double>(started_);
+
+    s.total_scheduler_overhead_ms =
+        std::chrono::duration<double, std::milli>(total_overhead_).count();
     return s;
 }
 

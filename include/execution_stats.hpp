@@ -45,8 +45,17 @@ struct ExecutionStats {
     std::size_t active_workers = 0;
     std::size_t peak_active_workers = 0;
 
-    double total_execution_ms = 0.0;
-    double average_execution_ms = 0.0;
+    std::uint64_t tasks_stolen = 0;
+    std::uint64_t steal_attempts = 0;
+    std::uint64_t successful_steals = 0;
+
+    double total_queue_wait_time_ms = 0.0;
+    double average_queue_wait_time_ms = 0.0;
+
+    double total_execution_time_ms = 0.0;
+    double average_execution_time_ms = 0.0;
+    
+    double total_scheduler_overhead_ms = 0.0;
 };
 
 // Internal thread-safe accumulator behind ThreadPool::get_stats().
@@ -64,6 +73,9 @@ public:
     void on_submitted(TaskPriority priority) noexcept;
     void on_started() noexcept;
     void on_finished(std::chrono::nanoseconds duration, bool failed) noexcept;
+    void record_wait_time(std::chrono::nanoseconds wait_time) noexcept;
+    void record_overhead(std::chrono::nanoseconds overhead) noexcept;
+    void record_steal_attempt(bool success) noexcept;
 
     ExecutionStats snapshot() const;
     std::size_t active_workers() const;
@@ -80,6 +92,10 @@ private:
     std::size_t active_ = 0;
     std::size_t peak_ = 0;
     std::chrono::nanoseconds total_execution_{0};
+    std::chrono::nanoseconds total_wait_{0};
+    std::chrono::nanoseconds total_overhead_{0};
+    std::uint64_t steal_attempts_ = 0;
+    std::uint64_t successful_steals_ = 0;
 };
 
 // RAII guard placed around the user callable. Records start on construction

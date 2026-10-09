@@ -12,6 +12,13 @@ enum class TaskPriority {
     High
 };
 
+enum class SchedulingPolicy {
+    FIFO,
+    Priority,
+    WorkStealing
+};
+
+
 inline constexpr std::size_t kPriorityLevels = 3;
 
 constexpr std::size_t priority_index(TaskPriority priority) noexcept {

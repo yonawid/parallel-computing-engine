@@ -17,7 +17,35 @@
 
 namespace pce {
 
-// Fixed-size pool of worker threads fed by a TaskQueue.
+class WorkerDeque {
+public:
+    void push_bottom(std::function<void()> task) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        deque_.push_back(std::move(task));
+    }
+
+    bool pop_bottom(std::function<void()>& task) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (deque_.empty()) return false;
+        task = std::move(deque_.back());
+        deque_.pop_back();
+        return true;
+    }
+
+    bool steal_top(std::function<void()>& task) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (deque_.empty()) return false;
+        task = std::move(deque_.front());
+        deque_.pop_front();
+        return true;
+    }
+
+private:
+    std::mutex mutex_;
+    std::deque<std::function<void()>> deque_;
+};
+
+// Fixed-size pool of worker threads fed by a TaskQueue or WorkerDeques.
 //
 // Lifecycle: workers start in the constructor and exit once the queue is closed
 // and drained. shutdown() closes the queue (rejecting further submissions),
@@ -35,7 +63,7 @@ public:
     // Throws std::invalid_argument if thread_count == 0. If a worker thread
     // cannot be created, already-started workers are stopped and joined before
     // the exception propagates.
-    explicit ThreadPool(std::size_t thread_count);
+    explicit ThreadPool(std::size_t thread_count, SchedulingPolicy policy = SchedulingPolicy::Priority);
 
     // Calls shutdown(); never throws.
     ~ThreadPool();
@@ -63,6 +91,10 @@ public:
         -> std::future<std::invoke_result_t<std::decay_t<F>, std::decay_t<Args>...>> {
         using Result = std::invoke_result_t<std::decay_t<F>, std::decay_t<Args>...>;
 
+        if (policy_ == SchedulingPolicy::FIFO || policy_ == SchedulingPolicy::WorkStealing) {
+            priority = TaskPriority::Normal; // Ignore priority in non-priority modes
+        }
+
         auto task = std::make_shared<std::packaged_task<Result()>>(
             [fn = std::decay_t<F>(std::forward<F>(function)),
              tup = std::tuple<std::decay_t<Args>...>(std::forward<Args>(args)...),
@@ -81,12 +113,33 @@ public:
             });
 
         std::future<Result> future = task->get_future();
-        if (!queue_.push(priority, [task = std::move(task)] { (*task)(); },
-                         [recorder_ptr = &stats_, priority]() noexcept {
-                             recorder_ptr->on_submitted(priority);
-                         })) {
-            throw std::runtime_error("ThreadPool::submit: pool has been shut down");
+        
+        auto enqueue_time = std::chrono::steady_clock::now();
+        std::function<void()> wrapped_task = [task = std::move(task), enqueue_time, recorder_ptr = &stats_]() mutable {
+            auto dequeue_time = std::chrono::steady_clock::now();
+            recorder_ptr->record_wait_time(dequeue_time - enqueue_time);
+            (*task)();
+        };
+
+        if (policy_ == SchedulingPolicy::WorkStealing) {
+            std::lock_guard<std::mutex> lock(ws_mutex_);
+            if (ws_closed_) {
+                throw std::runtime_error("ThreadPool::submit: pool has been shut down");
+            }
+            std::size_t index = ws_rr_counter_++ % thread_count_;
+            worker_deques_[index]->push_bottom(std::move(wrapped_task));
+            ws_total_tasks_++;
+            stats_.on_submitted(priority);
+            ws_cv_.notify_one();
+        } else {
+            if (!queue_.push(priority, std::move(wrapped_task),
+                             [recorder_ptr = &stats_, priority]() noexcept {
+                                 recorder_ptr->on_submitted(priority);
+                             })) {
+                throw std::runtime_error("ThreadPool::submit: pool has been shut down");
+            }
         }
+        
         return future;
     }
 
@@ -99,13 +152,23 @@ public:
     std::size_t active_worker_count() const { return stats_.active_workers(); }
 
 private:
-    void worker_loop();
+    void worker_loop(std::size_t worker_index);
 
+    SchedulingPolicy policy_;
     TaskQueue queue_;
     std::vector<std::thread> workers_;
     std::size_t thread_count_;
     std::once_flag shutdown_flag_;
     StatsRecorder stats_;
+
+    // Work-stealing state
+    std::vector<std::unique_ptr<WorkerDeque>> worker_deques_;
+    std::atomic<std::size_t> ws_rr_counter_{0};
+    std::mutex ws_mutex_;
+    std::condition_variable ws_cv_;
+    std::size_t ws_total_tasks_ = 0;
+    bool ws_closed_ = false;
+
 };
 
 }  // namespace pce
